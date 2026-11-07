@@ -24,7 +24,7 @@ MAX_DB_BYTES = 450 * 1024 * 1024
 HARD_VACUUM_BYTES = 485 * 1024 * 1024
 MANIFEST_FILE = "cluster_manifest.json"
 
-# 🌟 Offline (favorite_db.dart) နှင့် တစ်ထပ်တည်းကျစေရန် ပထမဆုံးအပိုင်း (Board Piece Placement) ကိုသာ သုံးမည်
+# Offline (favorite_db.dart) နှင့် တစ်ထပ်တည်းကျစေရန် ပထမဆုံးအပိုင်း (Piece Placement) ကိုသာ သုံးမည်
 INITIAL_BOARD_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
 
 # ၁။ FEN Cluster Group အတွက် (Project 1 - Region: ap-northeast-1)
@@ -32,7 +32,7 @@ FEN_CLUSTER_URLS = [
     "postgresql://postgres.lzeqykackqajwfaqpzgq:2006ChessMandalay@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres",
 ]
 
-# ၂။ Service Clusters Group အတွက် (Project 2 - Region: ap-southeast-1)
+# ၂။ Service Clusters Group အတွက် (Project 2 - Region: ap-southeast-1 + Map in Project 1)
 SERVER_CLUSTERS = [
     {
         "game_data": "postgresql://postgres.czekgqvmpugtydfxvlcu:2006ChessMandalay@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres",
@@ -54,16 +54,22 @@ class GamePayload(BaseModel):
     game_date: str = ""
     moves_text: str
 
+class BulkDeletePayload(BaseModel):
+    game_ids: List[int]
+
 def get_clean_fen(board) -> str:
-    """Offline favorite_db.dart ကဲ့သို့ FEN ၏ ပထမဆုံးအပိုင်း (အရုပ်အနေအထား) ကိုသာ ယူမည်"""
+    """Offline favorite_db.dart အတိုင်း FEN ၏ ပထမဆုံးအပိုင်း (အရုပ်အနေအထား) ကိုသာ ယူမည်"""
     return board.fen().split(" ")[0]
 
 def clean_fen_str(fen_str: str) -> str:
-    """ရှာဖွေလာသော FEN String မှ ပထမဆုံးအပိုင်း (အရုပ်အနေအထား) ကိုသာ သန့်စင်ထုတ်ယူမည်"""
     parts = fen_str.strip().split()
     return parts[0] if parts else ""
 
 def extract_fens_from_end_to_start(game) -> List[str]:
+    """
+    ပွဲစဉ်တစ်ပွဲ၏ ရွှေ့ကွက်များကို အစမှအဆုံး တွက်ချက်ပြီးနောက်
+    နောက်ဆုံးအကွက် (End Position) မှ ပထမဆုံးအကွက်သို့ ပြောင်းပြန် (Reverse) စီပေးသည့် Function
+    """
     board = game.board()
     fens_in_order = []
     for move in game.mainline_moves():
@@ -100,6 +106,8 @@ def init_tables_for_3in1(conn_game, conn_moves, conn_map):
             CREATE INDEX IF NOT EXISTS idx_white ON game_data(white);
             CREATE INDEX IF NOT EXISTS idx_black ON game_data(black);
             CREATE INDEX IF NOT EXISTS idx_event ON game_data(event);
+            CREATE INDEX IF NOT EXISTS idx_eco ON game_data(eco);
+            CREATE INDEX IF NOT EXISTS idx_result ON game_data(result);
         """)
     conn_game.commit()
 
@@ -116,8 +124,9 @@ def init_tables_for_3in1(conn_game, conn_moves, conn_map):
         cur.execute("""
             CREATE TABLE IF NOT EXISTS fen_game_map (
                 fen_id INTEGER PRIMARY KEY,
-                game_ids INTEGER[]
+                game_ids INTEGER[] NOT NULL DEFAULT '{}'
             );
+            CREATE INDEX IF NOT EXISTS idx_fen_game_map_gin ON fen_game_map USING GIN (game_ids);
         """)
     conn_map.commit()
 
@@ -126,12 +135,15 @@ def init_table_for_fen(conn_fen):
         cur.execute("""
             CREATE TABLE IF NOT EXISTS fen_positions (
                 fen_id INTEGER PRIMARY KEY,
-                fen_string TEXT UNIQUE
+                fen_string TEXT UNIQUE NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_fen_string ON fen_positions(fen_string);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_fen_string ON fen_positions(fen_string);
         """)
     conn_fen.commit()
 
+# =========================================================================
+# 🌟 SERVERLESS-SAFE 3 + 1 FAMILY CLUSTER MANIFEST MANAGER
+# =========================================================================
 def _default_manifest():
     return {
         "active_fen_cluster_idx": 0,
@@ -158,21 +170,31 @@ def load_or_init_manifest():
         conn = psycopg2.connect(FEN_CLUSTER_URLS[0])
         try:
             with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cluster_manifest_store (
+                        id INTEGER PRIMARY KEY,
+                        manifest_json JSONB NOT NULL,
+                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                    );
+                """)
+                conn.commit()
                 cur.execute("SELECT manifest_json FROM cluster_manifest_store WHERE id = 1;")
                 row = cur.fetchone()
                 if row and row[0]:
                     data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
-                    return _normalize_manifest(data)
+                    normalized = _normalize_manifest(data)
+                    with open(MANIFEST_FILE, "w", encoding="utf-8") as f:
+                        json.dump(normalized, f, indent=2)
+                    return normalized
         finally:
             conn.close()
     except Exception as e:
-        print(f"Manifest DB load fallback to local file: {e}")
+        print(f"Manifest DB load fallback: {e}")
 
-    if os.path.exists(MANIFEST_FILE):
-        with open(MANIFEST_FILE, "r", encoding="utf-8") as f:
-            return _normalize_manifest(json.load(f))
-
-    return _default_manifest()
+    # DB ထဲတွင် manifest မရှိပါက (ဥပမာ Table အသစ်ပြန်ဆောက်ထားပါက) Default အသစ်ဖြင့် စတင်မည်
+    fresh = _default_manifest()
+    save_manifest(fresh)
+    return fresh
 
 def save_manifest(manifest):
     try:
@@ -263,15 +285,28 @@ def select_writable_3in1_cluster_idx(manifest: dict) -> int:
         return max_c3 + 1
     return max_c3
 
+# =========================================================================
+# 🌟 ဘုံ FEN စနစ် (Shared Common FEN Upsert & Mapping)
+# =========================================================================
 def upsert_fens_with_family_manager(ordered_fens_from_end: List[str], manifest: dict):
+    """
+    တူညီသော FEN ရှိပြီးသားဖြစ်ပါက အသစ်ထပ်မထည့်ဘဲ ရှိပြီးသား ဘုံ fen_id ကို ပြန်သုံးမည်။
+    မရှိသေးသော FEN အသစ်များကိုသာ fen_positions သို့ ထည့်သွင်းမည်။
+    """
+    if not ordered_fens_from_end:
+        return {}, []
+
     max_fen_idx = min(manifest.get("active_fen_cluster_idx", 0), len(FEN_CLUSTER_URLS) - 1)
     fen_conns = [psycopg2.connect(url) for url in FEN_CLUSTER_URLS[:max_fen_idx + 1]]
+    for fc in fen_conns:
+        init_table_for_fen(fc)
 
     found_fen_map = {}
     touched_fen_cluster_indices = set()
     remaining_fens = list(dict.fromkeys(ordered_fens_from_end))
 
     try:
+        # ၁။ ရှိပြီးသား ဘုံ FEN များကို ရှာဖွေပြီး ၎င်းတို့၏ fen_id ကို ရယူမည်
         for idx, f_conn in enumerate(fen_conns):
             if not remaining_fens:
                 break
@@ -287,6 +322,7 @@ def upsert_fens_with_family_manager(ordered_fens_from_end: List[str], manifest: 
                     found_fen_map[row_fen] = row_id
             remaining_fens = [f for f in remaining_fens if f not in found_fen_map]
 
+        # ၂။ လုံးဝမရှိသေးသော FEN အသစ်များကိုသာ fen_positions ထဲသို့ ထည့်သွင်းမည်
         if remaining_fens:
             target_fen_idx = max_fen_idx
             for idx, f_conn in enumerate(fen_conns):
@@ -304,19 +340,30 @@ def upsert_fens_with_family_manager(ordered_fens_from_end: List[str], manifest: 
             active_fen_conn = fen_conns[target_fen_idx]
             touched_fen_cluster_indices.add(target_fen_idx)
 
-            current_fen_id = manifest["last_fen_id"] + 1
-            new_rows = []
-            for f_str in remaining_fens:
-                found_fen_map[f_str] = current_fen_id
-                new_rows.append((current_fen_id, f_str))
-                current_fen_id += 1
-
             with active_fen_conn.cursor() as cur:
+                # DB ထဲရှိ အမြင့်ဆုံး fen_id နှင့် manifest ကို ချိန်ညှိမည် (Conflict လုံးဝမဖြစ်စေရန်)
+                cur.execute("SELECT COALESCE(MAX(fen_id), 0) FROM fen_positions;")
+                db_max_fen_id = cur.fetchone()[0]
+                current_fen_id = max(manifest.get("last_fen_id", 0), db_max_fen_id) + 1
+
+                new_rows = []
+                for f_str in remaining_fens:
+                    new_rows.append((current_fen_id, f_str))
+                    current_fen_id += 1
+
                 execute_values(
                     cur,
                     "INSERT INTO fen_positions (fen_id, fen_string) VALUES %s ON CONFLICT (fen_string) DO NOTHING",
                     new_rows
                 )
+                # အမှန်တကယ် သိမ်းဆည်းပြီးသော fen_id များကို ပြန်ဆွဲထုတ်၍ အတိအကျ ချိတ်ဆက်မည်
+                cur.execute(
+                    "SELECT fen_string, fen_id FROM fen_positions WHERE fen_string = ANY(%s)",
+                    (remaining_fens,)
+                )
+                for row_fen, row_id in cur.fetchall():
+                    found_fen_map[row_fen] = row_id
+
             active_fen_conn.commit()
             manifest["last_fen_id"] = current_fen_id - 1
 
@@ -338,43 +385,8 @@ def upsert_fens_with_family_manager(ordered_fens_from_end: List[str], manifest: 
 
     return found_fen_map, sorted(list(touched_fen_cluster_indices))
 
-def find_fen_ids_and_owning_cluster(target_fen: str, manifest: dict):
-    """
-    🌟 1-part FEN (အရုပ်အနေအထားသက်သက်) ဖြင့် အမြန်ဆုံး ရှာဖွေပေးပြီး၊
-    အကယ်၍ DB ထဲတွင် ယခင် 4-part FEN အဟောင်းများ ရှိနေပါကလည်း B-Tree Prefix Index သုံး၍ ရှာပေးမည်။
-    """
-    clean_board_fen = clean_fen_str(target_fen)
-    if not clean_board_fen:
-        return [], None
-
-    max_fen_idx = min(manifest.get("active_fen_cluster_idx", 0), len(FEN_CLUSTER_URLS) - 1)
-    for idx in range(max_fen_idx + 1):
-        conn_fen = psycopg2.connect(FEN_CLUSTER_URLS[idx])
-        try:
-            with conn_fen.cursor() as cur:
-                # ၁။ Exact match (idx_fen_string Index ကို တိုက်ရိုက်သုံးသည် - အမြန်ဆုံး)
-                cur.execute(
-                    "SELECT fen_id FROM fen_positions WHERE fen_string = %s LIMIT 1",
-                    (clean_board_fen,)
-                )
-                row = cur.fetchone()
-                if row:
-                    return [row[0]], (idx + 1)
-
-                # ၂။ Fallback: ယခင် 4-part FEN ဖြင့် သိမ်းထားမိသော အကွက်များအတွက်
-                cur.execute(
-                    "SELECT fen_id FROM fen_positions WHERE fen_string LIKE %s LIMIT 10",
-                    (clean_board_fen + " %",)
-                )
-                rows = cur.fetchall()
-                if rows:
-                    return [r[0] for r in rows], (idx + 1)
-        finally:
-            conn_fen.close()
-    return [], None
-
 def batch_insert_fen_game_map(conn_map, fen_ids: List[int], game_id: int):
-    """ပွဲတစ်ပွဲ၏ FEN ID အားလုံးကို တစ်ကွက်ချင်း မပို့ဘဲ Query တစ်ကြောင်းတည်းဖြင့် အမြန်ဆုံး ချိတ်ဆက်မည်"""
+    """ဘုံ fen_id များအောက်ရှိ game_ids Array ထဲသို့ လက်ရှိ game_id ကို မထပ်စေဘဲ Batch ဖြင့် ထည့်သွင်းမည်"""
     if not fen_ids:
         return
     rows = [(f_id, [game_id]) for f_id in set(fen_ids)]
@@ -393,9 +405,125 @@ def batch_insert_fen_game_map(conn_map, fen_ids: List[int], game_id: int):
         )
     conn_map.commit()
 
+# =========================================================================
+# 🌟 ပွဲဖျက်/ပြင်ဆင်သည့်အခါ Map မရှိတော့သော ဘုံ FEN များကိုပါ ဖျက်သိမ်းသည့်စနစ်
+# =========================================================================
+def remove_games_from_map_and_cleanup_fens(conn_map, game_ids_to_remove: List[int], manifest: dict) -> int:
+    """
+    ၁။ fen_game_map ထဲမှ ပေးပို့လာသော game_id အားလုံးကို ဖယ်ရှားမည်။
+    ၂။ မည်သည့်ပွဲမျှ မကျန်တော့သော (cardinality(game_ids) = 0) fen_game_map row များကို ဖျက်မည်။
+    ၃။ ထိုသို့ Map မရှိတော့သည့် ဘုံ FEN များကို fen_positions Table ထဲမှပါ အပြီးတိုင် ဖျက်ပေးမည်။
+    """
+    if not game_ids_to_remove:
+        return 0
+
+    with conn_map.cursor() as cur:
+        if len(game_ids_to_remove) == 1:
+            gid = game_ids_to_remove[0]
+            cur.execute("""
+                UPDATE fen_game_map
+                SET game_ids = array_remove(game_ids, %s)
+                WHERE %s = ANY(game_ids);
+            """, (gid, gid))
+        else:
+            # ပွဲအများကြီး တစ်ပြိုင်နက် ဖျက်သည့်အခါ Array overlap (&&) သုံး၍ အမြန်ဖယ်ရှားမည်
+            cur.execute("""
+                UPDATE fen_game_map
+                SET game_ids = ARRAY(
+                    SELECT unnest(game_ids)
+                    EXCEPT
+                    SELECT unnest(%s::integer[])
+                )
+                WHERE game_ids && %s::integer[];
+            """, (game_ids_to_remove, game_ids_to_remove))
+
+        # game_ids အလွတ်ဖြစ်သွားသော fen_game_map row များကို ဖျက်ပြီး ၎င်း fen_id များကို ပြန်ယူမည်
+        cur.execute("""
+            DELETE FROM fen_game_map
+            WHERE cardinality(game_ids) = 0
+            RETURNING fen_id;
+        """)
+        emptied_fen_ids = [r[0] for r in cur.fetchall()]
+    conn_map.commit()
+
+    # အခြား Cluster များတွင် ထို fen_id များကို သုံးထားခြင်း ရှိ/မရှိ စစ်မည်
+    still_used_fen_ids = set()
+    if emptied_fen_ids:
+        max_c3 = min(manifest.get("active_3in1_cluster_idx", 0), len(SERVER_CLUSTERS) - 1)
+        checked_map_urls = set()
+        for idx in range(max_c3 + 1):
+            map_url = SERVER_CLUSTERS[idx]["fen_map"]
+            if map_url in checked_map_urls:
+                continue
+            checked_map_urls.add(map_url)
+            c_m = psycopg2.connect(map_url)
+            try:
+                with c_m.cursor() as m_cur:
+                    m_cur.execute(
+                        "SELECT fen_id FROM fen_game_map WHERE fen_id = ANY(%s) AND cardinality(game_ids) > 0",
+                        (emptied_fen_ids,)
+                    )
+                    for r in m_cur.fetchall():
+                        still_used_fen_ids.add(r[0])
+            finally:
+                c_m.close()
+
+    dead_fen_ids = [fid for fid in emptied_fen_ids if fid not in still_used_fen_ids]
+
+    # FEN Cluster များထဲမှ Map မရှိတော့သော ဘုံ FEN များကို အပြီးတိုင် ဖျက်ထုတ်မည်
+    deleted_fen_count = 0
+    max_fen_idx = min(manifest.get("active_fen_cluster_idx", 0), len(FEN_CLUSTER_URLS) - 1)
+    for idx in range(max_fen_idx + 1):
+        f_url = FEN_CLUSTER_URLS[idx]
+        conn_fen = psycopg2.connect(f_url)
+        try:
+            with conn_fen.cursor() as f_cur:
+                if dead_fen_ids:
+                    f_cur.execute("DELETE FROM fen_positions WHERE fen_id = ANY(%s);", (dead_fen_ids,))
+                    deleted_fen_count += f_cur.rowcount
+
+                # fen_positions နှင့် fen_game_map တူညီသော Project တွင် ရှိနေပါက ကျန်ကြွင်းနေသော Orphan FEN အားလုံးကိုပါ သန့်စင်မည်
+                if f_url == SERVER_CLUSTERS[0]["fen_map"]:
+                    f_cur.execute("""
+                        DELETE FROM fen_positions p
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM fen_game_map m WHERE m.fen_id = p.fen_id
+                        );
+                    """)
+                    deleted_fen_count += f_cur.rowcount
+            conn_fen.commit()
+            vacuum_if_needed(conn_fen)
+        finally:
+            conn_fen.close()
+
+    return deleted_fen_count
+
+def find_fen_ids_and_owning_cluster(target_fen: str, manifest: dict):
+    clean_board_fen = clean_fen_str(target_fen)
+    if not clean_board_fen:
+        return [], None
+
+    max_fen_idx = min(manifest.get("active_fen_cluster_idx", 0), len(FEN_CLUSTER_URLS) - 1)
+    for idx in range(max_fen_idx + 1):
+        conn_fen = psycopg2.connect(FEN_CLUSTER_URLS[idx])
+        try:
+            with conn_fen.cursor() as cur:
+                cur.execute(
+                    "SELECT fen_id FROM fen_positions WHERE fen_string = %s LIMIT 1",
+                    (clean_board_fen,)
+                )
+                row = cur.fetchone()
+                if row:
+                    return [row[0]], (idx + 1)
+        finally:
+            conn_fen.close()
+    return [], None
+
+# ---------------------------------------------------------
+# PGN ကို စနစ်တကျ ခွဲထုတ်သိမ်းဆည်းခြင်း
+# ---------------------------------------------------------
 def process_pgn_on_server(pgn_text: str):
     manifest = load_or_init_manifest()
-    current_game_id = manifest["last_game_id"] + 1
     pgn_io = io.StringIO(pgn_text)
 
     c3_idx = select_writable_3in1_cluster_idx(manifest)
@@ -409,6 +537,11 @@ def process_pgn_on_server(pgn_text: str):
     conn_fen_init.close()
 
     try:
+        with conn_game.cursor() as cur:
+            cur.execute("SELECT COALESCE(MAX(game_id), 0) FROM game_data;")
+            db_max_game_id = cur.fetchone()[0]
+        current_game_id = max(manifest.get("last_game_id", 0), db_max_game_id) + 1
+
         while True:
             game = chess.pgn.read_game(pgn_io)
             if game is None:
@@ -427,7 +560,12 @@ def process_pgn_on_server(pgn_text: str):
                 cur.execute("""
                     INSERT INTO game_data (game_id, white, white_elo, black, black_elo, result, event, site, round, eco, game_date)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (game_id) DO NOTHING
+                    ON CONFLICT (game_id) DO UPDATE SET
+                        white = EXCLUDED.white, white_elo = EXCLUDED.white_elo,
+                        black = EXCLUDED.black, black_elo = EXCLUDED.black_elo,
+                        result = EXCLUDED.result, event = EXCLUDED.event,
+                        site = EXCLUDED.site, round = EXCLUDED.round,
+                        eco = EXCLUDED.eco, game_date = EXCLUDED.game_date
                 """, (
                     current_game_id, white, w_elo, black, b_elo, result,
                     headers.get("Event", ""), headers.get("Site", ""),
@@ -438,10 +576,10 @@ def process_pgn_on_server(pgn_text: str):
             exporter = chess.pgn.StringExporter(headers=False, variations=False, comments=False)
             moves_text = game.accept(exporter).strip()
             with conn_moves.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO raw_moves (game_id, moves_text) VALUES (%s, %s) ON CONFLICT (game_id) DO NOTHING",
-                    (current_game_id, moves_text)
-                )
+                cur.execute("""
+                    INSERT INTO raw_moves (game_id, moves_text) VALUES (%s, %s)
+                    ON CONFLICT (game_id) DO UPDATE SET moves_text = EXCLUDED.moves_text
+                """, (current_game_id, moves_text))
             conn_moves.commit()
 
             fens_from_end = extract_fens_from_end_to_start(game)
@@ -460,48 +598,9 @@ def process_pgn_on_server(pgn_text: str):
         conn_moves.close()
         conn_map.close()
 
-# 🌟 ရှိပြီးသား ပွဲအဟောင်းများကို FEN Index အသစ် ပြန်ဆောက်ပေးမည့် Background Function
-def reindex_existing_games_on_server():
-    manifest = load_or_init_manifest()
-    max_c3 = min(manifest.get("active_3in1_cluster_idx", 0), len(SERVER_CLUSTERS) - 1)
-
-    conn_fen_init = psycopg2.connect(FEN_CLUSTER_URLS[0])
-    init_table_for_fen(conn_fen_init)
-    conn_fen_init.close()
-
-    for idx in range(max_c3 + 1):
-        conn_moves = psycopg2.connect(SERVER_CLUSTERS[idx]["raw_moves"])
-        conn_map = psycopg2.connect(SERVER_CLUSTERS[idx]["fen_map"])
-        try:
-            with conn_map.cursor() as cur:
-                cur.execute("CREATE TABLE IF NOT EXISTS fen_game_map (fen_id INTEGER PRIMARY KEY, game_ids INTEGER[]);")
-            conn_map.commit()
-
-            with conn_moves.cursor() as cur:
-                cur.execute("SELECT game_id, moves_text FROM raw_moves ORDER BY game_id ASC;")
-                all_games = cur.fetchall()
-
-            for game_id, moves_text in all_games:
-                if not moves_text:
-                    continue
-                game_obj = chess.pgn.read_game(io.StringIO(moves_text))
-                if not game_obj:
-                    continue
-
-                fens_from_end = extract_fens_from_end_to_start(game_obj)
-                found_fen_map, used_fen_indices = upsert_fens_with_family_manager(fens_from_end, manifest)
-                fen_ids = [found_fen_map[f_str] for f_str in fens_from_end if f_str in found_fen_map]
-                batch_insert_fen_game_map(conn_map, fen_ids, game_id)
-
-                register_3in1_family_link(manifest, idx, game_id, used_fen_indices)
-                if game_id > manifest["last_game_id"]:
-                    manifest["last_game_id"] = game_id
-
-            save_manifest(manifest)
-        finally:
-            conn_moves.close()
-            conn_map.close()
-
+# ---------------------------------------------------------
+# API Endpoints
+# ---------------------------------------------------------
 @app.get("/")
 def health_check():
     return {"status": "online", "service": "Victory Chess 3+1 Family Cluster API"}
@@ -509,12 +608,6 @@ def health_check():
 @app.get("/clusters/manifest")
 def get_cluster_manifest():
     return load_or_init_manifest()
-
-@app.post("/games/reindex-all")
-def trigger_reindex_all(background_tasks: BackgroundTasks):
-    """fen_positions Table ဖျက်မိထားပါက ရှိပြီးသားပွဲအားလုံးကို FEN Index ပြန်ဆောက်ရန်"""
-    background_tasks.add_task(reindex_existing_games_on_server)
-    return {"status": "reindexing_started", "message": "ရှိပြီးသား ပွဲစဉ်အားလုံးကို နောက်ကွယ်တွင် FEN Index ပြန်ဆောက်ပေးနေပါပြီ။"}
 
 @app.post("/upload-pgn")
 async def upload_pgn(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
@@ -524,7 +617,7 @@ async def upload_pgn(background_tasks: BackgroundTasks, file: UploadFile = File(
     return {"status": "started", "message": "Server ပေါ်တွင် PGN ကို ခွဲထုတ်သိမ်းဆည်းနေပါပြီ။"}
 
 @app.post("/games/single")
-def add_single_game(payload: GamePayload, background_tasks: BackgroundTasks):
+def add_single_game(payload: GamePayload):
     w_elo_str = str(payload.white_elo) if payload.white_elo is not None else ""
     b_elo_str = str(payload.black_elo) if payload.black_elo is not None else ""
     pgn_str = (
@@ -540,8 +633,9 @@ def add_single_game(payload: GamePayload, background_tasks: BackgroundTasks):
         f'[ECO "{payload.eco}"]\n\n'
         f'{payload.moves_text} {payload.result}\n\n'
     )
-    background_tasks.add_task(process_pgn_on_server, pgn_str)
-    return {"status": "added", "message": "ပွဲစဉ်အသစ်ကို ထည့်သွင်းနေပါပြီ။"}
+    # တစ်ပွဲချင်း ထည့်သွင်းရာတွင် ချက်ချင်း သိမ်းဆည်းပြီး FEN ဘုံချိတ်ဆက်ပေးမည်
+    process_pgn_on_server(pgn_str)
+    return {"status": "added", "message": "ပွဲစဉ်အသစ်နှင့် ဘုံ FEN များကို ထည့်သွင်းပြီးပါပြီ။"}
 
 @app.get("/games/search")
 def search_games(
@@ -565,12 +659,10 @@ def search_games(
     results = []
 
     target_fen_ids = []
-    owning_fen_cluster_num = None
     clean_board_fen = clean_fen_str(fen)
 
-    # မူလအစ Position မဟုတ်မှသာ FEN Table တွင် ရှာမည်
     if use_position and clean_board_fen and clean_board_fen != INITIAL_BOARD_FEN:
-        target_fen_ids, owning_fen_cluster_num = find_fen_ids_and_owning_cluster(clean_board_fen, manifest)
+        target_fen_ids, _ = find_fen_ids_and_owning_cluster(clean_board_fen, manifest)
         if not target_fen_ids:
             return []
 
@@ -669,8 +761,6 @@ def search_games(
                 params.append(allowed_results)
 
             where_sql = " WHERE " + " AND ".join(conditions) if conditions else ""
-
-            # 🌟 N+1 Query လုံးဝမဖြစ်စေရန် LEFT JOIN ဖြင့် တစ်ကြိမ်တည်း အမြန်ဆုံး ဆွဲထုတ်မည်
             query_sql = f"""
                 SELECT g.*, COALESCE(m.moves_text, '') AS moves_text
                 FROM game_data g
@@ -693,8 +783,179 @@ def search_games(
                 r["blackElo"] = r.get("black_elo")
                 r["date"] = r.get("game_date")
                 results.append(r)
-
         finally:
             conn_game.close()
 
     return results[:50]
+
+@app.put("/games/{game_id}")
+def update_game(game_id: int, payload: GamePayload):
+    manifest = load_or_init_manifest()
+    old_c3_idx = find_3in1_cluster_for_game(game_id, manifest)
+
+    conn_game = psycopg2.connect(SERVER_CLUSTERS[old_c3_idx]["game_data"])
+    conn_moves = psycopg2.connect(SERVER_CLUSTERS[old_c3_idx]["raw_moves"])
+    conn_map = psycopg2.connect(SERVER_CLUSTERS[old_c3_idx]["fen_map"])
+
+    try:
+        with conn_moves.cursor() as cur:
+            cur.execute("SELECT moves_text FROM raw_moves WHERE game_id=%s", (game_id,))
+            old_row = cur.fetchone()
+            old_moves = old_row[0] if old_row else ""
+
+        moves_changed = old_moves.strip() != payload.moves_text.strip()
+
+        with conn_game.cursor() as cur:
+            cur.execute("""
+                UPDATE game_data
+                SET white=%s, white_elo=%s, black=%s, black_elo=%s,
+                    result=%s, event=%s, site=%s, round=%s, eco=%s, game_date=%s
+                WHERE game_id=%s
+            """, (
+                payload.white, payload.white_elo, payload.black, payload.black_elo,
+                payload.result, payload.event, payload.site, payload.round,
+                payload.eco, payload.game_date, game_id
+            ))
+        conn_game.commit()
+
+        cleaned_orphan_fens = 0
+        if moves_changed:
+            with conn_moves.cursor() as cur:
+                cur.execute("UPDATE raw_moves SET moves_text=%s WHERE game_id=%s", (payload.moves_text, game_id))
+            conn_moves.commit()
+
+            # ၁။ ယခင်ရွှေ့ကွက်ဟောင်းများ၏ Map ကို ဖြုတ်မည်
+            # ၂။ ရွှေ့ကွက်သစ်များဖြင့် ဘုံ FEN များ ပြန်ချိတ်မည်
+            # ၃။ မည်သည့်ပွဲနှင့်မျှ Map မရှိတော့သော FEN အဟောင်းများကို fen_positions မှ အပြီးတိုင် ဖျက်မည်
+            with conn_map.cursor() as m_cur:
+                m_cur.execute("""
+                    UPDATE fen_game_map
+                    SET game_ids = array_remove(game_ids, %s)
+                    WHERE %s = ANY(game_ids);
+                """, (game_id, game_id))
+            conn_map.commit()
+
+            game_obj = chess.pgn.read_game(io.StringIO(payload.moves_text))
+            if game_obj:
+                fens_from_end = extract_fens_from_end_to_start(game_obj)
+                found_fen_map, used_fen_indices = upsert_fens_with_family_manager(fens_from_end, manifest)
+                fen_ids = [found_fen_map[f_str] for f_str in fens_from_end if f_str in found_fen_map]
+                batch_insert_fen_game_map(conn_map, fen_ids, game_id)
+                register_3in1_family_link(manifest, old_c3_idx, game_id, used_fen_indices)
+
+            # Map မရှိတော့သည့် ဘုံ FEN အဟောင်းများကို ရှင်းလင်းမည်
+            cleaned_orphan_fens = remove_games_from_map_and_cleanup_fens(conn_map, [], manifest)
+            save_manifest(manifest)
+
+        vacuum_if_needed(conn_game)
+        vacuum_if_needed(conn_moves)
+        vacuum_if_needed(conn_map)
+
+        return {
+            "status": "updated",
+            "game_id": game_id,
+            "cleaned_orphan_fens": cleaned_orphan_fens
+        }
+    finally:
+        conn_game.close()
+        conn_moves.close()
+        conn_map.close()
+
+@app.delete("/games/{game_id}")
+def delete_game(game_id: int):
+    manifest = load_or_init_manifest()
+    c3_idx = find_3in1_cluster_for_game(game_id, manifest)
+
+    conn_game = psycopg2.connect(SERVER_CLUSTERS[c3_idx]["game_data"])
+    conn_moves = psycopg2.connect(SERVER_CLUSTERS[c3_idx]["raw_moves"])
+    conn_map = psycopg2.connect(SERVER_CLUSTERS[c3_idx]["fen_map"])
+
+    try:
+        with conn_game.cursor() as cur:
+            cur.execute("DELETE FROM game_data WHERE game_id = %s", (game_id,))
+        conn_game.commit()
+
+        with conn_moves.cursor() as cur:
+            cur.execute("DELETE FROM raw_moves WHERE game_id = %s", (game_id,))
+        conn_moves.commit()
+
+        # Map ထဲမှ game_id ကို ဖယ်ရှားပြီး Map လုံးဝမရှိတော့သော ဘုံ FEN များကို fen_positions မှပါ ဖျက်မည်
+        cleaned_fens = remove_games_from_map_and_cleanup_fens(conn_map, [game_id], manifest)
+
+        vacuum_if_needed(conn_game)
+        vacuum_if_needed(conn_moves)
+        vacuum_if_needed(conn_map)
+
+        if str(game_id) in manifest.get("moved_games_registry", {}):
+            del manifest["moved_games_registry"][str(game_id)]
+        save_manifest(manifest)
+
+        return {
+            "status": "deleted",
+            "game_id": game_id,
+            "cleaned_orphan_fens": cleaned_fens
+        }
+    finally:
+        conn_game.close()
+        conn_moves.close()
+        conn_map.close()
+
+@app.post("/games/bulk-delete")
+def bulk_delete_games(payload: BulkDeletePayload):
+    """ပွဲအများကြီးကို တစ်ပြိုင်နက် ဖျက်သည့်အခါ သက်ဆိုင်ရာ Map မရှိတော့သော ဘုံ FEN များအထိ အကုန်ရှင်းလင်းပေးမည်"""
+    game_ids = list(set(payload.game_ids))
+    if not game_ids:
+        return {"status": "no_games_specified", "deleted_games": 0, "cleaned_orphan_fens": 0}
+
+    manifest = load_or_init_manifest()
+    max_c3 = min(manifest.get("active_3in1_cluster_idx", 0), len(SERVER_CLUSTERS) - 1)
+    total_cleaned_fens = 0
+
+    for idx in range(max_c3 + 1):
+        conn_game = psycopg2.connect(SERVER_CLUSTERS[idx]["game_data"])
+        conn_moves = psycopg2.connect(SERVER_CLUSTERS[idx]["raw_moves"])
+        conn_map = psycopg2.connect(SERVER_CLUSTERS[idx]["fen_map"])
+        try:
+            with conn_game.cursor() as cur:
+                cur.execute("DELETE FROM game_data WHERE game_id = ANY(%s);", (game_ids,))
+            conn_game.commit()
+
+            with conn_moves.cursor() as cur:
+                cur.execute("DELETE FROM raw_moves WHERE game_id = ANY(%s);", (game_ids,))
+            conn_moves.commit()
+
+            total_cleaned_fens += remove_games_from_map_and_cleanup_fens(conn_map, game_ids, manifest)
+
+            vacuum_if_needed(conn_game)
+            vacuum_if_needed(conn_moves)
+            vacuum_if_needed(conn_map)
+        finally:
+            conn_game.close()
+            conn_moves.close()
+            conn_map.close()
+
+    for gid in game_ids:
+        manifest.get("moved_games_registry", {}).pop(str(gid), None)
+    save_manifest(manifest)
+
+    return {
+        "status": "bulk_deleted",
+        "deleted_games": len(game_ids),
+        "cleaned_orphan_fens": total_cleaned_fens
+    }
+
+@app.post("/games/cleanup-orphan-fens")
+def manual_cleanup_orphan_fens():
+    """Supabase ထဲမှ ပွဲများကို တိုက်ရိုက်ဖျက်မိသည့်အခါ ကျန်နေသော Map မဲ့ FEN များကို ရှင်းလင်းရန်"""
+    manifest = load_or_init_manifest()
+    conn_map = psycopg2.connect(SERVER_CLUSTERS[0]["fen_map"])
+    try:
+        cleaned = remove_games_from_map_and_cleanup_fens(conn_map, [], manifest)
+        return {"status": "cleaned", "cleaned_orphan_fens": cleaned}
+    finally:
+        conn_map.close()
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 7860))
+    uvicorn.run("server_main:app", host="0.0.0.0", port=port, reload=False)
