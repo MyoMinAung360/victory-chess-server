@@ -23,26 +23,16 @@ app.add_middleware(
 MAX_DB_BYTES = 450 * 1024 * 1024
 HARD_VACUUM_BYTES = 485 * 1024 * 1024
 MANIFEST_FILE = "cluster_manifest.json"
-INITIAL_BOARD_FEN_4 = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
 
-# ---------------------------------------------------------
-# Supabase PostgreSQL Connection URLs (Project ၂ လုံးစာ ဖွဲ့စည်းပုံ)
-# ---------------------------------------------------------
-
-# ---------------------------------------------------------
-# Supabase PostgreSQL Connection URLs (Project ၂ လုံးစာ ဖွဲ့စည်းပုံ)
-# ---------------------------------------------------------
-
-# ---------------------------------------------------------
-# Supabase PostgreSQL Connection URLs (Project ၂ လုံးစာ ဖွဲ့စည်းပုံ)
-# ---------------------------------------------------------
+# 🌟 Offline (favorite_db.dart) နှင့် တစ်ထပ်တည်းကျစေရန် ပထမဆုံးအပိုင်း (Board Piece Placement) ကိုသာ သုံးမည်
+INITIAL_BOARD_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
 
 # ၁။ FEN Cluster Group အတွက် (Project 1 - Region: ap-northeast-1)
 FEN_CLUSTER_URLS = [
     "postgresql://postgres.lzeqykackqajwfaqpzgq:2006ChessMandalay@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres",
 ]
 
-# ၂. Service Clusters Group အတွက် (Project 2 - Region: ap-southeast-1)
+# ၂။ Service Clusters Group အတွက် (Project 2 - Region: ap-southeast-1)
 SERVER_CLUSTERS = [
     {
         "game_data": "postgresql://postgres.czekgqvmpugtydfxvlcu:2006ChessMandalay@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres",
@@ -50,6 +40,7 @@ SERVER_CLUSTERS = [
         "fen_map":   "postgresql://postgres.lzeqykackqajwfaqpzgq:2006ChessMandalay@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres",
     },
 ]
+
 class GamePayload(BaseModel):
     white: str
     white_elo: Optional[int] = None
@@ -63,27 +54,24 @@ class GamePayload(BaseModel):
     game_date: str = ""
     moves_text: str
 
-def get_clean_fen(board):
-    return " ".join(board.fen().split(" ")[:4])
+def get_clean_fen(board) -> str:
+    """Offline favorite_db.dart ကဲ့သို့ FEN ၏ ပထမဆုံးအပိုင်း (အရုပ်အနေအထား) ကိုသာ ယူမည်"""
+    return board.fen().split(" ")[0]
 
 def clean_fen_str(fen_str: str) -> str:
-    return " ".join(fen_str.strip().split()[:4])
+    """ရှာဖွေလာသော FEN String မှ ပထမဆုံးအပိုင်း (အရုပ်အနေအထား) ကိုသာ သန့်စင်ထုတ်ယူမည်"""
+    parts = fen_str.strip().split()
+    return parts[0] if parts else ""
 
 def extract_fens_from_end_to_start(game) -> List[str]:
-    """
-    ပွဲစဉ်တစ်ပွဲ၏ ရွှေ့ကွက်များကို အစမှအဆုံး တွက်ချက်ပြီးနောက်
-    FEN Central Base သို့ ထည့်သွင်းရာတွင် ကစားပွဲ၏ နောက်ဆုံးအကွက် (End Position) မှ
-    ပထမဆုံးအကွက်သို့ ပြောင်းပြန် (Reverse) စီပေးသည့် Function
-    """
     board = game.board()
     fens_in_order = []
     for move in game.mainline_moves():
         board.push(move)
         c_fen = get_clean_fen(board)
-        if c_fen != INITIAL_BOARD_FEN_4:
+        if c_fen and c_fen != INITIAL_BOARD_FEN:
             fens_in_order.append(c_fen)
 
-    # နောက်ဆုံးအကွက်မှ စတင်၍ ရှေ့သို့ ပြောင်းပြန်စီပြီး Duplicate ဖယ်ရှားမည် (အစီအစဉ် မပျက်စေရပါ)
     return list(dict.fromkeys(reversed(fens_in_order)))
 
 def get_db_size(conn):
@@ -144,10 +132,6 @@ def init_table_for_fen(conn_fen):
         """)
     conn_fen.commit()
 
-# =========================================================================
-# 🌟 SERVERLESS-SAFE 3 + 1 FAMILY CLUSTER MANAGER
-# (Free Serverless အိပ်သွားလျှင်လည်း ဒေတာမပျောက်စေရန် Supabase DB ထဲ၌ သိမ်းဆည်းပေးသည်)
-# =========================================================================
 def _default_manifest():
     return {
         "active_fen_cluster_idx": 0,
@@ -170,33 +154,20 @@ def _normalize_manifest(data: dict) -> dict:
     return data
 
 def load_or_init_manifest():
-    # ၁။ ပထမဦးစွာ Primary Supabase DB (FEN_CLUSTER_URLS[0]) ထဲရှိ cluster_manifest_store table မှ ဖတ်မည်
     try:
         conn = psycopg2.connect(FEN_CLUSTER_URLS[0])
         try:
             with conn.cursor() as cur:
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS cluster_manifest_store (
-                        id INTEGER PRIMARY KEY,
-                        manifest_json JSONB NOT NULL,
-                        updated_at TIMESTAMPTZ DEFAULT NOW()
-                    );
-                """)
-                conn.commit()
                 cur.execute("SELECT manifest_json FROM cluster_manifest_store WHERE id = 1;")
                 row = cur.fetchone()
                 if row and row[0]:
                     data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
-                    normalized = _normalize_manifest(data)
-                    with open(MANIFEST_FILE, "w", encoding="utf-8") as f:
-                        json.dump(normalized, f, indent=2)
-                    return normalized
+                    return _normalize_manifest(data)
         finally:
             conn.close()
     except Exception as e:
         print(f"Manifest DB load fallback to local file: {e}")
 
-    # ၂။ အကယ်၍ DB ထဲတွင် မရှိသေးပါက Local file မှ ဖတ်မည်
     if os.path.exists(MANIFEST_FILE):
         with open(MANIFEST_FILE, "r", encoding="utf-8") as f:
             return _normalize_manifest(json.load(f))
@@ -204,14 +175,12 @@ def load_or_init_manifest():
     return _default_manifest()
 
 def save_manifest(manifest):
-    # ၁။ Local cache ဖိုင်တွင် သိမ်းမည်
     try:
         with open(MANIFEST_FILE, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
     except Exception as e:
         print(f"Local manifest write warning: {e}")
 
-    # ၂။ Primary Supabase DB ထဲတွင် အမြဲတမ်း မပျောက်ပျက်အောင် သိမ်းဆည်းမည်
     try:
         conn = psycopg2.connect(FEN_CLUSTER_URLS[0])
         try:
@@ -235,7 +204,6 @@ def save_manifest(manifest):
         print(f"Manifest DB save error: {e}")
 
 def register_3in1_family_link(manifest: dict, c3_idx: int, game_id: int, used_fen_cluster_indices: List[int]):
-    """3-in-1 Cluster နှင့် FEN Cluster များအကြား မိသားစုချိတ်ဆက်မှု (3+1 Family) ကို မှတ်တမ်းတင်ခြင်း"""
     c3_name = f"3in1_cluster_{c3_idx + 1}"
     if c3_name not in manifest["3in1_clusters"]:
         manifest["3in1_clusters"][c3_name] = {
@@ -255,7 +223,6 @@ def register_3in1_family_link(manifest: dict, c3_idx: int, game_id: int, used_fe
     info["linked_fen_clusters"] = sorted(list(linked))
 
 def find_3in1_cluster_for_game(game_id: int, manifest: dict) -> int:
-    """Game ID တစ်ခုသည် မည်သည့် 3in1 Cluster တွင် ရှိနေသည်ကို အတိအကျ ရှာဖွေပေးခြင်း"""
     str_gid = str(game_id)
     if str_gid in manifest.get("moved_games_registry", {}):
         return manifest["moved_games_registry"][str_gid]
@@ -280,21 +247,15 @@ def find_3in1_cluster_for_game(game_id: int, manifest: dict) -> int:
     return manifest["active_3in1_cluster_idx"]
 
 def select_writable_3in1_cluster_idx(manifest: dict) -> int:
-    """
-    Senior Cluster များတွင် ဖျက်ထား၍ နေရာလွတ် (450MB အောက်) ပြန်ပေါ်လာပါက
-    ရှေ့ Senior Cluster သို့ အလိုအလျောက် ပြန်ထည့်ပေးပြီး၊ ပြည့်နေမှ Junior Cluster သစ်သို့ ပို့ပေးမည်။
-    """
     max_c3 = min(manifest.get("active_3in1_cluster_idx", 0), len(SERVER_CLUSTERS) - 1)
     for idx in range(max_c3 + 1):
         c_g = psycopg2.connect(SERVER_CLUSTERS[idx]["game_data"])
-        c_m = psycopg2.connect(SERVER_CLUSTERS[idx]["raw_moves"])
         c_map = psycopg2.connect(SERVER_CLUSTERS[idx]["fen_map"])
         try:
-            if max(get_db_size(c_g), get_db_size(c_m), get_db_size(c_map)) < MAX_DB_BYTES:
+            if max(get_db_size(c_g), get_db_size(c_map)) < MAX_DB_BYTES:
                 return idx
         finally:
             c_g.close()
-            c_m.close()
             c_map.close()
 
     if (max_c3 + 1) < len(SERVER_CLUSTERS):
@@ -303,19 +264,11 @@ def select_writable_3in1_cluster_idx(manifest: dict) -> int:
     return max_c3
 
 def upsert_fens_with_family_manager(ordered_fens_from_end: List[str], manifest: dict):
-    """
-    🌟 ကစားပွဲ၏ နောက်ဆုံးအကွက်မှ စတင်ပေးပို့လာသော FEN များကို စစ်ဆေးပြီး
-    ရှိပြီးသား FEN ဖြစ်က ထပ်မထည့်ဘဲ fen_id ကိုသာ ပြန်ယူကာ (လုံးဝ ရပ်မပစ်ပါ)၊
-    မရှိသေးသော FEN များကို နောက်ဆုံးအကွက်မှ စတင်၍ FEN Central Base သို့ ထည့်သွင်းမည်။
-    """
     max_fen_idx = min(manifest.get("active_fen_cluster_idx", 0), len(FEN_CLUSTER_URLS) - 1)
     fen_conns = [psycopg2.connect(url) for url in FEN_CLUSTER_URLS[:max_fen_idx + 1]]
-    for fc in fen_conns:
-        init_table_for_fen(fc)
 
     found_fen_map = {}
     touched_fen_cluster_indices = set()
-    # နောက်ဆုံးအကွက်မှ ပထမဆုံးအကွက်သို့ အစီအစဉ်မပျက် ထိန်းသိမ်းထားမည်
     remaining_fens = list(dict.fromkeys(ordered_fens_from_end))
 
     try:
@@ -332,8 +285,6 @@ def upsert_fens_with_family_manager(ordered_fens_from_end: List[str], manifest: 
                     touched_fen_cluster_indices.add(idx)
                 for row_fen, row_id in rows:
                     found_fen_map[row_fen] = row_id
-            # ရှိပြီးသား FEN များကို အသစ်ထပ်မထည့်ရန် ချန်လှပ်ထားခဲ့မည်
-            # (သို့သော် found_fen_map ထဲတွင် ပါဝင်ပြီးဖြစ်၍ fen_game_map ၌ game_id ချိတ်ဆက်မှု လုံးဝမပျက်ပါ)
             remaining_fens = [f for f in remaining_fens if f not in found_fen_map]
 
         if remaining_fens:
@@ -355,7 +306,6 @@ def upsert_fens_with_family_manager(ordered_fens_from_end: List[str], manifest: 
 
             current_fen_id = manifest["last_fen_id"] + 1
             new_rows = []
-            # remaining_fens သည် နောက်ဆုံးအကွက်မှ စတင်ထားသဖြင့် နောက်ဆုံးအကွက်မှစ၍ fen_id အသစ် ဝင်မည်
             for f_str in remaining_fens:
                 found_fen_map[f_str] = current_fen_id
                 new_rows.append((current_fen_id, f_str))
@@ -388,42 +338,82 @@ def upsert_fens_with_family_manager(ordered_fens_from_end: List[str], manifest: 
 
     return found_fen_map, sorted(list(touched_fen_cluster_indices))
 
-def find_fen_id_and_owning_cluster(target_fen: str, manifest: dict):
-    clean_target = clean_fen_str(target_fen)
+def find_fen_ids_and_owning_cluster(target_fen: str, manifest: dict):
+    """
+    🌟 1-part FEN (အရုပ်အနေအထားသက်သက်) ဖြင့် အမြန်ဆုံး ရှာဖွေပေးပြီး၊
+    အကယ်၍ DB ထဲတွင် ယခင် 4-part FEN အဟောင်းများ ရှိနေပါကလည်း B-Tree Prefix Index သုံး၍ ရှာပေးမည်။
+    """
+    clean_board_fen = clean_fen_str(target_fen)
+    if not clean_board_fen:
+        return [], None
+
     max_fen_idx = min(manifest.get("active_fen_cluster_idx", 0), len(FEN_CLUSTER_URLS) - 1)
     for idx in range(max_fen_idx + 1):
         conn_fen = psycopg2.connect(FEN_CLUSTER_URLS[idx])
         try:
             with conn_fen.cursor() as cur:
-                cur.execute("SELECT fen_id FROM fen_positions WHERE fen_string = %s LIMIT 1", (clean_target,))
+                # ၁။ Exact match (idx_fen_string Index ကို တိုက်ရိုက်သုံးသည် - အမြန်ဆုံး)
+                cur.execute(
+                    "SELECT fen_id FROM fen_positions WHERE fen_string = %s LIMIT 1",
+                    (clean_board_fen,)
+                )
                 row = cur.fetchone()
                 if row:
-                    return row[0], (idx + 1)
+                    return [row[0]], (idx + 1)
+
+                # ၂။ Fallback: ယခင် 4-part FEN ဖြင့် သိမ်းထားမိသော အကွက်များအတွက်
+                cur.execute(
+                    "SELECT fen_id FROM fen_positions WHERE fen_string LIKE %s LIMIT 10",
+                    (clean_board_fen + " %",)
+                )
+                rows = cur.fetchall()
+                if rows:
+                    return [r[0] for r in rows], (idx + 1)
         finally:
             conn_fen.close()
-    return None, None
+    return [], None
 
-# ---------------------------------------------------------
-# PGN ကို Background တွင် စနစ်တကျ ခွဲထုတ်သိမ်းဆည်းခြင်း
-# ---------------------------------------------------------
+def batch_insert_fen_game_map(conn_map, fen_ids: List[int], game_id: int):
+    """ပွဲတစ်ပွဲ၏ FEN ID အားလုံးကို တစ်ကွက်ချင်း မပို့ဘဲ Query တစ်ကြောင်းတည်းဖြင့် အမြန်ဆုံး ချိတ်ဆက်မည်"""
+    if not fen_ids:
+        return
+    rows = [(f_id, [game_id]) for f_id in set(fen_ids)]
+    with conn_map.cursor() as cur:
+        execute_values(
+            cur,
+            """
+            INSERT INTO fen_game_map (fen_id, game_ids) VALUES %s
+            ON CONFLICT (fen_id) DO UPDATE
+            SET game_ids = CASE
+                WHEN fen_game_map.game_ids @> EXCLUDED.game_ids THEN fen_game_map.game_ids
+                ELSE fen_game_map.game_ids || EXCLUDED.game_ids
+            END;
+            """,
+            rows
+        )
+    conn_map.commit()
+
 def process_pgn_on_server(pgn_text: str):
     manifest = load_or_init_manifest()
     current_game_id = manifest["last_game_id"] + 1
     pgn_io = io.StringIO(pgn_text)
 
-    while True:
-        game = chess.pgn.read_game(pgn_io)
-        if game is None:
-            break
+    c3_idx = select_writable_3in1_cluster_idx(manifest)
+    conn_game = psycopg2.connect(SERVER_CLUSTERS[c3_idx]["game_data"])
+    conn_moves = psycopg2.connect(SERVER_CLUSTERS[c3_idx]["raw_moves"])
+    conn_map = psycopg2.connect(SERVER_CLUSTERS[c3_idx]["fen_map"])
+    init_tables_for_3in1(conn_game, conn_moves, conn_map)
 
-        c3_idx = select_writable_3in1_cluster_idx(manifest)
+    conn_fen_init = psycopg2.connect(FEN_CLUSTER_URLS[0])
+    init_table_for_fen(conn_fen_init)
+    conn_fen_init.close()
 
-        conn_game = psycopg2.connect(SERVER_CLUSTERS[c3_idx]["game_data"])
-        conn_moves = psycopg2.connect(SERVER_CLUSTERS[c3_idx]["raw_moves"])
-        conn_map = psycopg2.connect(SERVER_CLUSTERS[c3_idx]["fen_map"])
-        init_tables_for_3in1(conn_game, conn_moves, conn_map)
+    try:
+        while True:
+            game = chess.pgn.read_game(pgn_io)
+            if game is None:
+                break
 
-        try:
             headers = game.headers
             white = headers.get("White", "Unknown")
             black = headers.get("Black", "Unknown")
@@ -437,6 +427,7 @@ def process_pgn_on_server(pgn_text: str):
                 cur.execute("""
                     INSERT INTO game_data (game_id, white, white_elo, black, black_elo, result, event, site, round, eco, game_date)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (game_id) DO NOTHING
                 """, (
                     current_game_id, white, w_elo, black, b_elo, result,
                     headers.get("Event", ""), headers.get("Site", ""),
@@ -447,37 +438,70 @@ def process_pgn_on_server(pgn_text: str):
             exporter = chess.pgn.StringExporter(headers=False, variations=False, comments=False)
             moves_text = game.accept(exporter).strip()
             with conn_moves.cursor() as cur:
-                cur.execute("INSERT INTO raw_moves (game_id, moves_text) VALUES (%s, %s)", (current_game_id, moves_text))
+                cur.execute(
+                    "INSERT INTO raw_moves (game_id, moves_text) VALUES (%s, %s) ON CONFLICT (game_id) DO NOTHING",
+                    (current_game_id, moves_text)
+                )
             conn_moves.commit()
 
-            # 🌟 ကစားပွဲ၏ နောက်ဆုံးအကွက်မှ ပထမဆုံးအကွက်သို့ ပြောင်းပြန်စီ၍ FEN Central Base သို့ ပို့မည်
             fens_from_end = extract_fens_from_end_to_start(game)
             found_fen_map, used_fen_indices = upsert_fens_with_family_manager(fens_from_end, manifest)
 
-            with conn_map.cursor() as cur:
-                for f_str in fens_from_end:
-                    f_id = found_fen_map.get(f_str)
-                    if f_id is not None:
-                        cur.execute("""
-                            INSERT INTO fen_game_map (fen_id, game_ids) VALUES (%s, %s)
-                            ON CONFLICT (fen_id) DO UPDATE
-                            SET game_ids = array(SELECT DISTINCT unnest(fen_game_map.game_ids || EXCLUDED.game_ids));
-                        """, (f_id, [current_game_id]))
-            conn_map.commit()
+            fen_ids = [found_fen_map[f_str] for f_str in fens_from_end if f_str in found_fen_map]
+            batch_insert_fen_game_map(conn_map, fen_ids, current_game_id)
 
             register_3in1_family_link(manifest, c3_idx, current_game_id, used_fen_indices)
             manifest["last_game_id"] = current_game_id
-            save_manifest(manifest)
-
             current_game_id += 1
+
+        save_manifest(manifest)
+    finally:
+        conn_game.close()
+        conn_moves.close()
+        conn_map.close()
+
+# 🌟 ရှိပြီးသား ပွဲအဟောင်းများကို FEN Index အသစ် ပြန်ဆောက်ပေးမည့် Background Function
+def reindex_existing_games_on_server():
+    manifest = load_or_init_manifest()
+    max_c3 = min(manifest.get("active_3in1_cluster_idx", 0), len(SERVER_CLUSTERS) - 1)
+
+    conn_fen_init = psycopg2.connect(FEN_CLUSTER_URLS[0])
+    init_table_for_fen(conn_fen_init)
+    conn_fen_init.close()
+
+    for idx in range(max_c3 + 1):
+        conn_moves = psycopg2.connect(SERVER_CLUSTERS[idx]["raw_moves"])
+        conn_map = psycopg2.connect(SERVER_CLUSTERS[idx]["fen_map"])
+        try:
+            with conn_map.cursor() as cur:
+                cur.execute("CREATE TABLE IF NOT EXISTS fen_game_map (fen_id INTEGER PRIMARY KEY, game_ids INTEGER[]);")
+            conn_map.commit()
+
+            with conn_moves.cursor() as cur:
+                cur.execute("SELECT game_id, moves_text FROM raw_moves ORDER BY game_id ASC;")
+                all_games = cur.fetchall()
+
+            for game_id, moves_text in all_games:
+                if not moves_text:
+                    continue
+                game_obj = chess.pgn.read_game(io.StringIO(moves_text))
+                if not game_obj:
+                    continue
+
+                fens_from_end = extract_fens_from_end_to_start(game_obj)
+                found_fen_map, used_fen_indices = upsert_fens_with_family_manager(fens_from_end, manifest)
+                fen_ids = [found_fen_map[f_str] for f_str in fens_from_end if f_str in found_fen_map]
+                batch_insert_fen_game_map(conn_map, fen_ids, game_id)
+
+                register_3in1_family_link(manifest, idx, game_id, used_fen_indices)
+                if game_id > manifest["last_game_id"]:
+                    manifest["last_game_id"] = game_id
+
+            save_manifest(manifest)
         finally:
-            conn_game.close()
             conn_moves.close()
             conn_map.close()
 
-# ---------------------------------------------------------
-# API Endpoints: Health, Bulk Upload, Single Add, Dual Search, Edit & Delete
-# ---------------------------------------------------------
 @app.get("/")
 def health_check():
     return {"status": "online", "service": "Victory Chess 3+1 Family Cluster API"}
@@ -485,6 +509,12 @@ def health_check():
 @app.get("/clusters/manifest")
 def get_cluster_manifest():
     return load_or_init_manifest()
+
+@app.post("/games/reindex-all")
+def trigger_reindex_all(background_tasks: BackgroundTasks):
+    """fen_positions Table ဖျက်မိထားပါက ရှိပြီးသားပွဲအားလုံးကို FEN Index ပြန်ဆောက်ရန်"""
+    background_tasks.add_task(reindex_existing_games_on_server)
+    return {"status": "reindexing_started", "message": "ရှိပြီးသား ပွဲစဉ်အားလုံးကို နောက်ကွယ်တွင် FEN Index ပြန်ဆောက်ပေးနေပါပြီ။"}
 
 @app.post("/upload-pgn")
 async def upload_pgn(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
@@ -534,86 +564,93 @@ def search_games(
     max_c3 = min(manifest.get("active_3in1_cluster_idx", 0), len(SERVER_CLUSTERS) - 1)
     results = []
 
-    target_fen_id = None
+    target_fen_ids = []
     owning_fen_cluster_num = None
-    if use_position and fen.strip():
-        target_fen_id, owning_fen_cluster_num = find_fen_id_and_owning_cluster(fen, manifest)
-        if target_fen_id is None:
+    clean_board_fen = clean_fen_str(fen)
+
+    # မူလအစ Position မဟုတ်မှသာ FEN Table တွင် ရှာမည်
+    if use_position and clean_board_fen and clean_board_fen != INITIAL_BOARD_FEN:
+        target_fen_ids, owning_fen_cluster_num = find_fen_ids_and_owning_cluster(clean_board_fen, manifest)
+        if not target_fen_ids:
             return []
 
     for idx in range(max_c3 + 1):
-        c3_name = f"3in1_cluster_{idx + 1}"
-        if owning_fen_cluster_num is not None and c3_name in manifest.get("3in1_clusters", {}):
-            linked_fens = manifest["3in1_clusters"][c3_name].get("linked_fen_clusters", [])
-            if linked_fens and owning_fen_cluster_num not in linked_fens:
-                continue
+        candidate_game_ids = None
+        if target_fen_ids:
+            conn_map = psycopg2.connect(SERVER_CLUSTERS[idx]["fen_map"])
+            try:
+                with conn_map.cursor() as map_cur:
+                    map_cur.execute(
+                        "SELECT game_ids FROM fen_game_map WHERE fen_id = ANY(%s)",
+                        (target_fen_ids,)
+                    )
+                    m_rows = map_cur.fetchall()
+                    if not m_rows:
+                        continue
+                    merged_ids = set()
+                    for r in m_rows:
+                        if r[0]:
+                            merged_ids.update(r[0])
+                    if not merged_ids:
+                        continue
+                    candidate_game_ids = list(merged_ids)
+            finally:
+                conn_map.close()
 
         conn_game = psycopg2.connect(SERVER_CLUSTERS[idx]["game_data"])
-        conn_moves = psycopg2.connect(SERVER_CLUSTERS[idx]["raw_moves"])
-        conn_map = psycopg2.connect(SERVER_CLUSTERS[idx]["fen_map"]) if target_fen_id is not None else None
-
         try:
-            candidate_game_ids = None
-            if target_fen_id is not None and conn_map is not None:
-                with conn_map.cursor() as map_cur:
-                    map_cur.execute("SELECT game_ids FROM fen_game_map WHERE fen_id = %s", (target_fen_id,))
-                    m_row = map_cur.fetchone()
-                    if not m_row or not m_row[0]:
-                        continue
-                    candidate_game_ids = m_row[0]
-
             conditions = []
             params = []
 
             if candidate_game_ids is not None:
-                conditions.append("game_id = ANY(%s)")
+                conditions.append("g.game_id = ANY(%s)")
                 params.append(candidate_game_ids)
 
             if q.strip():
                 if q.strip().isdigit():
-                    conditions.append("game_id = %s")
+                    conditions.append("g.game_id = %s")
                     params.append(int(q.strip()))
                 else:
                     like_q = f"%{q.strip()}%"
-                    conditions.append("(white ILIKE %s OR black ILIKE %s OR event ILIKE %s OR eco ILIKE %s OR game_date ILIKE %s)")
+                    conditions.append("(g.white ILIKE %s OR g.black ILIKE %s OR g.event ILIKE %s OR g.eco ILIKE %s OR g.game_date ILIKE %s)")
                     params.extend([like_q, like_q, like_q, like_q, like_q])
 
             w_clean = white.strip()
             b_clean = black.strip()
             if ignore_colours:
                 if w_clean and b_clean:
-                    conditions.append("((white ILIKE %s AND black ILIKE %s) OR (white ILIKE %s AND black ILIKE %s))")
+                    conditions.append("((g.white ILIKE %s AND g.black ILIKE %s) OR (g.white ILIKE %s AND g.black ILIKE %s))")
                     params.extend([f"%{w_clean}%", f"%{b_clean}%", f"%{b_clean}%", f"%{w_clean}%"])
                 elif w_clean:
-                    conditions.append("(white ILIKE %s OR black ILIKE %s)")
+                    conditions.append("(g.white ILIKE %s OR g.black ILIKE %s)")
                     params.extend([f"%{w_clean}%", f"%{w_clean}%"])
                 elif b_clean:
-                    conditions.append("(white ILIKE %s OR black ILIKE %s)")
+                    conditions.append("(g.white ILIKE %s OR g.black ILIKE %s)")
                     params.extend([f"%{b_clean}%", f"%{b_clean}%"])
             else:
                 if w_clean:
-                    conditions.append("white ILIKE %s")
+                    conditions.append("g.white ILIKE %s")
                     params.append(f"%{w_clean}%")
                 if b_clean:
-                    conditions.append("black ILIKE %s")
+                    conditions.append("g.black ILIKE %s")
                     params.append(f"%{b_clean}%")
 
             if white_elo is not None and white_elo > 0:
-                conditions.append("white_elo >= %s")
+                conditions.append("g.white_elo >= %s")
                 params.append(white_elo)
             if black_elo is not None and black_elo > 0:
-                conditions.append("black_elo >= %s")
+                conditions.append("g.black_elo >= %s")
                 params.append(black_elo)
 
             if tournament.strip():
-                conditions.append("event ILIKE %s")
+                conditions.append("g.event ILIKE %s")
                 params.append(f"%{tournament.strip()}%")
 
             if year_start is not None or year_end is not None:
                 y_start = year_start if year_start is not None else 0
                 y_end = year_end if year_end is not None else 9999
                 conditions.append(
-                    "CAST(NULLIF(REGEXP_REPLACE(SUBSTRING(game_date FROM 1 FOR 4), '[^0-9]', '', 'g'), '') AS INTEGER) BETWEEN %s AND %s"
+                    "CAST(NULLIF(REGEXP_REPLACE(SUBSTRING(g.game_date FROM 1 FOR 4), '[^0-9]', '', 'g'), '') AS INTEGER) BETWEEN %s AND %s"
                 )
                 params.extend([y_start, y_end])
 
@@ -628,194 +665,36 @@ def search_games(
             if len(allowed_results) < 4:
                 if not allowed_results:
                     continue
-                conditions.append("result = ANY(%s)")
+                conditions.append("g.result = ANY(%s)")
                 params.append(allowed_results)
 
             where_sql = " WHERE " + " AND ".join(conditions) if conditions else ""
-            query_sql = f"SELECT * FROM game_data {where_sql} ORDER BY game_id DESC LIMIT 50"
+
+            # 🌟 N+1 Query လုံးဝမဖြစ်စေရန် LEFT JOIN ဖြင့် တစ်ကြိမ်တည်း အမြန်ဆုံး ဆွဲထုတ်မည်
+            query_sql = f"""
+                SELECT g.*, COALESCE(m.moves_text, '') AS moves_text
+                FROM game_data g
+                LEFT JOIN raw_moves m ON g.game_id = m.game_id
+                {where_sql}
+                ORDER BY g.game_id DESC
+                LIMIT 50
+            """
 
             with conn_game.cursor() as cur:
                 cur.execute(query_sql, tuple(params))
                 columns = [desc[0] for desc in cur.description]
                 rows = [dict(zip(columns, r)) for r in cur.fetchall()]
 
-            with conn_moves.cursor() as m_cur:
-                for r in rows:
-                    m_cur.execute("SELECT moves_text FROM raw_moves WHERE game_id = %s", (r["game_id"],))
-                    m_row = m_cur.fetchone()
-                    moves_str = m_row[0] if m_row else ""
-
-                    r["moves_text"] = moves_str
-                    r["moves"] = moves_str
-                    r["whiteElo"] = r.get("white_elo")
-                    r["blackElo"] = r.get("black_elo")
-                    r["date"] = r.get("game_date")
-                    results.append(r)
+            for r in rows:
+                moves_str = r.get("moves_text") or ""
+                r["moves_text"] = moves_str
+                r["moves"] = moves_str
+                r["whiteElo"] = r.get("white_elo")
+                r["blackElo"] = r.get("black_elo")
+                r["date"] = r.get("game_date")
+                results.append(r)
 
         finally:
             conn_game.close()
-            conn_moves.close()
-            if conn_map:
-                conn_map.close()
 
     return results[:50]
-
-@app.put("/games/{game_id}")
-def update_game(game_id: int, payload: GamePayload):
-    manifest = load_or_init_manifest()
-    old_c3_idx = find_3in1_cluster_for_game(game_id, manifest)
-
-    conn_game = psycopg2.connect(SERVER_CLUSTERS[old_c3_idx]["game_data"])
-    conn_moves = psycopg2.connect(SERVER_CLUSTERS[old_c3_idx]["raw_moves"])
-    conn_map = psycopg2.connect(SERVER_CLUSTERS[old_c3_idx]["fen_map"])
-
-    vacuum_if_needed(conn_game)
-    vacuum_if_needed(conn_moves)
-    vacuum_if_needed(conn_map)
-
-    with conn_moves.cursor() as cur:
-        cur.execute("SELECT moves_text FROM raw_moves WHERE game_id=%s", (game_id,))
-        old_row = cur.fetchone()
-        old_moves = old_row[0] if old_row else ""
-
-    moves_changed = old_moves.strip() != payload.moves_text.strip()
-    cluster_full = max(get_db_size(conn_game), get_db_size(conn_moves), get_db_size(conn_map)) >= MAX_DB_BYTES
-    target_c3_idx = old_c3_idx
-
-    if moves_changed and cluster_full:
-        new_c3_idx = select_writable_3in1_cluster_idx(manifest)
-        if new_c3_idx != old_c3_idx:
-            target_c3_idx = new_c3_idx
-
-    if target_c3_idx != old_c3_idx:
-        with conn_game.cursor() as cur:
-            cur.execute("DELETE FROM game_data WHERE game_id=%s", (game_id,))
-        conn_game.commit()
-        with conn_moves.cursor() as cur:
-            cur.execute("DELETE FROM raw_moves WHERE game_id=%s", (game_id,))
-        conn_moves.commit()
-        with conn_map.cursor() as cur:
-            cur.execute("""
-                UPDATE fen_game_map SET game_ids = array_remove(game_ids, %s) WHERE %s = ANY(game_ids);
-                DELETE FROM fen_game_map WHERE cardinality(game_ids) = 0;
-            """, (game_id, game_id))
-        conn_map.commit()
-        conn_game.close()
-        conn_moves.close()
-        conn_map.close()
-
-        conn_game = psycopg2.connect(SERVER_CLUSTERS[target_c3_idx]["game_data"])
-        conn_moves = psycopg2.connect(SERVER_CLUSTERS[target_c3_idx]["raw_moves"])
-        conn_map = psycopg2.connect(SERVER_CLUSTERS[target_c3_idx]["fen_map"])
-        init_tables_for_3in1(conn_game, conn_moves, conn_map)
-
-        with conn_game.cursor() as cur:
-            cur.execute("""
-                INSERT INTO game_data (game_id, white, white_elo, black, black_elo, result, event, site, round, eco, game_date)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                game_id, payload.white, payload.white_elo, payload.black, payload.black_elo,
-                payload.result, payload.event, payload.site, payload.round, payload.eco, payload.game_date
-            ))
-        conn_game.commit()
-
-        with conn_moves.cursor() as cur:
-            cur.execute("INSERT INTO raw_moves (game_id, moves_text) VALUES (%s, %s)", (game_id, payload.moves_text))
-        conn_moves.commit()
-
-        manifest["moved_games_registry"][str(game_id)] = target_c3_idx
-    else:
-        with conn_game.cursor() as cur:
-            cur.execute("""
-                UPDATE game_data
-                SET white=%s, white_elo=%s, black=%s, black_elo=%s,
-                    result=%s, event=%s, site=%s, round=%s, eco=%s, game_date=%s
-                WHERE game_id=%s
-            """, (
-                payload.white, payload.white_elo, payload.black, payload.black_elo,
-                payload.result, payload.event, payload.site, payload.round,
-                payload.eco, payload.game_date, game_id
-            ))
-        conn_game.commit()
-
-        if moves_changed:
-            with conn_moves.cursor() as cur:
-                cur.execute("UPDATE raw_moves SET moves_text=%s WHERE game_id=%s", (payload.moves_text, game_id))
-            conn_moves.commit()
-
-            with conn_map.cursor() as m_cur:
-                m_cur.execute("""
-                    UPDATE fen_game_map SET game_ids = array_remove(game_ids, %s) WHERE %s = ANY(game_ids);
-                    DELETE FROM fen_game_map WHERE cardinality(game_ids) = 0;
-                """, (game_id, game_id))
-            conn_map.commit()
-
-    if moves_changed or (target_c3_idx != old_c3_idx):
-        game_obj = chess.pgn.read_game(io.StringIO(payload.moves_text))
-        if game_obj:
-            # 🌟 ကစားပွဲ၏ နောက်ဆုံးအကွက်မှ ပထမဆုံးအကွက်သို့ ပြောင်းပြန်စီ၍ FEN Central Base သို့ ပို့မည်
-            fens_from_end = extract_fens_from_end_to_start(game_obj)
-            found_fen_map, used_fen_indices = upsert_fens_with_family_manager(fens_from_end, manifest)
-
-            with conn_map.cursor() as m_cur:
-                for f_str in fens_from_end:
-                    f_id = found_fen_map.get(f_str)
-                    if f_id is not None:
-                        m_cur.execute("""
-                            INSERT INTO fen_game_map (fen_id, game_ids) VALUES (%s, %s)
-                            ON CONFLICT (fen_id) DO UPDATE
-                            SET game_ids = array(SELECT DISTINCT unnest(fen_game_map.game_ids || EXCLUDED.game_ids));
-                        """, (f_id, [game_id]))
-            conn_map.commit()
-
-            register_3in1_family_link(manifest, target_c3_idx, game_id, used_fen_indices)
-            save_manifest(manifest)
-
-    conn_game.close()
-    conn_moves.close()
-    conn_map.close()
-    return {"status": "updated", "game_id": game_id, "cluster": target_c3_idx + 1}
-
-@app.delete("/games/{game_id}")
-def delete_game(game_id: int):
-    manifest = load_or_init_manifest()
-    c3_idx = find_3in1_cluster_for_game(game_id, manifest)
-
-    conn_game = psycopg2.connect(SERVER_CLUSTERS[c3_idx]["game_data"])
-    conn_moves = psycopg2.connect(SERVER_CLUSTERS[c3_idx]["raw_moves"])
-    conn_map = psycopg2.connect(SERVER_CLUSTERS[c3_idx]["fen_map"])
-
-    with conn_game.cursor() as cur:
-        cur.execute("DELETE FROM game_data WHERE game_id = %s", (game_id,))
-    conn_game.commit()
-
-    with conn_moves.cursor() as cur:
-        cur.execute("DELETE FROM raw_moves WHERE game_id = %s", (game_id,))
-    conn_moves.commit()
-
-    with conn_map.cursor() as cur:
-        cur.execute("""
-            UPDATE fen_game_map
-            SET game_ids = array_remove(game_ids, %s)
-            WHERE %s = ANY(game_ids);
-            DELETE FROM fen_game_map WHERE cardinality(game_ids) = 0;
-        """, (game_id, game_id))
-    conn_map.commit()
-
-    vacuum_if_needed(conn_game)
-    vacuum_if_needed(conn_moves)
-    vacuum_if_needed(conn_map)
-
-    if str(game_id) in manifest.get("moved_games_registry", {}):
-        del manifest["moved_games_registry"][str(game_id)]
-        save_manifest(manifest)
-
-    conn_game.close()
-    conn_moves.close()
-    conn_map.close()
-    return {"status": "deleted", "game_id": game_id}
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 7860))
-    uvicorn.run("server_main:app", host="0.0.0.0", port=port, reload=False)
