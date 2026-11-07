@@ -29,19 +29,17 @@ INITIAL_BOARD_FEN_4 = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
 # Supabase PostgreSQL Connection URLs (Project ၂ လုံးစာ ဖွဲ့စည်းပုံ)
 # ---------------------------------------------------------
 
-# ၁။ Central FEN Cluster Group (Project 1: VictoryChess-FEN-1 ၏ IPv4 Pooler URL)
+# ၁။ FEN Cluster Group အတွက် (Project 1)
 FEN_CLUSTER_URLS = [
     "postgresql://postgres.lzeqykackqajwfaqpzgq:2006ChessMandalay@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres",
 ]
 
-# ၂. Service Clusters Group (Project 2: VictoryChess-Service-1 ၏ IPv4 Pooler URL)
-# ဤနေရာတွင် game_data နှင့် raw_moves တို့ကို Service Project သို့ ထည့်ပြီး၊
-# fen_map ကိုတော့ FEN Project ဘက်သို့ ချိတ်ဆက်ပေးပါမည်
+# ၂. Service Clusters Group အတွက် (Project 2)
 SERVER_CLUSTERS = [
     {
-        "game_data": "postgresql://postgres.czekgqvmpugtydfxvlcu:2006ChessMandalay@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres", # Service Project
-        "raw_moves": "postgresql://postgres.czekgqvmpugtydfxvlcu:2006ChessMandalay@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres", # Service Project
-        "fen_map":   "postgresql://postgres.lzeqykackqajwfaqpzgq:2006ChessMandalay@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres",   # FEN Project သို့ ချိတ်မည်
+        "game_data": "postgresql://postgres.czekgqvmpugtydfxvlcu:2006ChessMandalay@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres",
+        "raw_moves": "postgresql://postgres.czekgqvmpugtydfxvlcu:2006ChessMandalay@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres",
+        "fen_map":   "postgresql://postgres.lzeqykackqajwfaqpzgq:2006ChessMandalay@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres",
     },
 ]
 class GamePayload(BaseModel):
