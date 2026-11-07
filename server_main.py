@@ -522,6 +522,40 @@ def find_fen_ids_and_owning_cluster(target_fen: str, manifest: dict):
 # ---------------------------------------------------------
 # PGN ကို စနစ်တကျ ခွဲထုတ်သိမ်းဆည်းခြင်း
 # ---------------------------------------------------------
+def is_duplicate_game_across_clusters(white: str, black: str, moves_text: str, manifest: dict) -> bool:
+    """
+    Cluster အားလုံးတွင် White, Black နှင့် Moves လုံးဝတူညီသော ပွဲ ရှိ/မရှိ စစ်ဆေးမည်။
+    """
+    max_c3 = min(manifest.get("active_3in1_cluster_idx", 0), len(SERVER_CLUSTERS) - 1)
+    for idx in range(max_c3 + 1):
+        conn_moves = psycopg2.connect(SERVER_CLUSTERS[idx]["raw_moves"])
+        conn_game = psycopg2.connect(SERVER_CLUSTERS[idx]["game_data"])
+        try:
+            with conn_moves.cursor() as m_cur:
+                # md5 index ဖြင့် ရွှေ့ကွက်တူသော game_id များကို အမြန်ရှာမည်
+                m_cur.execute(
+                    "SELECT game_id FROM raw_moves WHERE md5(moves_text) = md5(%s) AND moves_text = %s",
+                    (moves_text, moves_text)
+                )
+                same_move_ids = [r[0] for r in m_cur.fetchall()]
+
+            if same_move_ids:
+                with conn_game.cursor() as g_cur:
+                    g_cur.execute(
+                        """
+                        SELECT 1 FROM game_data
+                        WHERE game_id = ANY(%s) AND white = %s AND black = %s
+                        LIMIT 1
+                        """,
+                        (same_move_ids, white, black)
+                    )
+                    if g_cur.fetchone():
+                        return True
+        finally:
+            conn_moves.close()
+            conn_game.close()
+    return False
+
 def process_pgn_on_server(pgn_text: str):
     manifest = load_or_init_manifest()
     pgn_io = io.StringIO(pgn_text)
@@ -548,24 +582,28 @@ def process_pgn_on_server(pgn_text: str):
                 break
 
             headers = game.headers
-            white = headers.get("White", "Unknown")
-            black = headers.get("Black", "Unknown")
+            white = headers.get("White", "Unknown").strip()
+            black = headers.get("Black", "Unknown").strip()
             w_elo = int(headers["WhiteElo"]) if headers.get("WhiteElo", "").isdigit() else None
             b_elo = int(headers["BlackElo"]) if headers.get("BlackElo", "").isdigit() else None
             result = headers.get("Result", "?-?").strip()
             if not result or result in ["*", "?"]:
                 result = "?-?"
 
+            exporter = chess.pgn.StringExporter(headers=False, variations=False, comments=False)
+            moves_text = game.accept(exporter).strip()
+            if not moves_text:
+                continue
+
+            # 🌟 ပွဲတူ (White, Black, Moves အတိအကျတူပြီးသား) ရှိနေပါက ထပ်မထည့်ဘဲ ကျော်သွားမည်
+            if is_duplicate_game_across_clusters(white, black, moves_text, manifest):
+                continue
+
             with conn_game.cursor() as cur:
                 cur.execute("""
                     INSERT INTO game_data (game_id, white, white_elo, black, black_elo, result, event, site, round, eco, game_date)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (game_id) DO UPDATE SET
-                        white = EXCLUDED.white, white_elo = EXCLUDED.white_elo,
-                        black = EXCLUDED.black, black_elo = EXCLUDED.black_elo,
-                        result = EXCLUDED.result, event = EXCLUDED.event,
-                        site = EXCLUDED.site, round = EXCLUDED.round,
-                        eco = EXCLUDED.eco, game_date = EXCLUDED.game_date
+                    ON CONFLICT (game_id) DO NOTHING
                 """, (
                     current_game_id, white, w_elo, black, b_elo, result,
                     headers.get("Event", ""), headers.get("Site", ""),
@@ -573,12 +611,10 @@ def process_pgn_on_server(pgn_text: str):
                 ))
             conn_game.commit()
 
-            exporter = chess.pgn.StringExporter(headers=False, variations=False, comments=False)
-            moves_text = game.accept(exporter).strip()
             with conn_moves.cursor() as cur:
                 cur.execute("""
                     INSERT INTO raw_moves (game_id, moves_text) VALUES (%s, %s)
-                    ON CONFLICT (game_id) DO UPDATE SET moves_text = EXCLUDED.moves_text
+                    ON CONFLICT (game_id) DO NOTHING
                 """, (current_game_id, moves_text))
             conn_moves.commit()
 
