@@ -31,15 +31,15 @@ INITIAL_BOARD_FEN_4 = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
 
 # ၁။ FEN Cluster Group အတွက် (Project 1)
 FEN_CLUSTER_URLS = [
-    "postgres:2006ChessMandalay@db.lzeqykackqajwfaqpzgq.supabase.co:5432/postgres",
+    "postgresql://postgres.lzeqykackqajwfaqpzgq:2006ChessMandalay@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres",
 ]
 
 # ၂. Service Clusters Group အတွက် (Project 2)
 SERVER_CLUSTERS = [
     {
-        "game_data": "postgres:2006ChessMandalay@db.czekgqvmpugtydfxvlcu.supabase.co:5432/postgres",
-        "raw_moves": "postgres:2006ChessMandalay@db.czekgqvmpugtydfxvlcu.supabase.co:5432/postgres",
-        "fen_map":   "postgres:2006ChessMandalay@db.lzeqykackqajwfaqpzgq.supabase.co:5432/postgres",
+        "game_data": "postgresql://postgres.czekgqvmpugtydfxvlcu:2006ChessMandalay@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres",
+        "raw_moves": "postgresql://postgres.czekgqvmpugtydfxvlcu:2006ChessMandalay@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres",
+        "fen_map":   "postgresql://postgres.lzeqykackqajwfaqpzgq:2006ChessMandalay@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres",
     },
 ]
 class GamePayload(BaseModel):
