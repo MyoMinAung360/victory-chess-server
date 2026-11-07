@@ -519,9 +519,6 @@ def find_fen_ids_and_owning_cluster(target_fen: str, manifest: dict):
             conn_fen.close()
     return [], None
 
-# ---------------------------------------------------------
-# PGN ကို စနစ်တကျ ခွဲထုတ်သိမ်းဆည်းခြင်း
-# ---------------------------------------------------------
 def is_duplicate_game_across_clusters(white: str, black: str, moves_text: str, manifest: dict) -> bool:
     """
     Cluster အားလုံးတွင် White, Black နှင့် Moves လုံးဝတူညီသော ပွဲ ရှိ/မရှိ စစ်ဆေးမည်။
