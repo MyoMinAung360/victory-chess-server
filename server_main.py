@@ -29,6 +29,10 @@ INITIAL_BOARD_FEN_4 = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
 # Supabase PostgreSQL Connection URLs (Project ၂ လုံးစာ ဖွဲ့စည်းပုံ)
 # ---------------------------------------------------------
 
+# ---------------------------------------------------------
+# Supabase PostgreSQL Connection URLs (Project ၂ လုံးစာ ဖွဲ့စည်းပုံ)
+# ---------------------------------------------------------
+
 # ၁။ FEN Cluster Group အတွက် (Project 1)
 FEN_CLUSTER_URLS = [
     "postgresql://postgres.lzeqykackqajwfaqpzgq:2006ChessMandalay@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres",
